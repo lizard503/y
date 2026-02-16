@@ -20,20 +20,20 @@ mount ${DISK}p1 /mnt/boot
 pacstrap /mnt base linux linux-firmware networkmanager sudo vim git \
     base-devel man-db man-pages
 
-genfstab -U /mnt &amp;amp;amp;gt;&amp;amp;amp;gt; /mnt/etc/fstab
+genfstab -U /mnt >> /mnt/etc/fstab
 
 ### CHROOT
-arch-chroot /mnt /bin/bash &amp;amp;amp;lt;&amp;amp;amp;lt; 'EOF'
+arch-chroot /mnt /bin/bash << 'EOF'
 
 ### Локали
 ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime
 hwclock --systohc
 sed -i 's/#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
 locale-gen
-echo "LANG=en_US.UTF-8" &amp;amp;amp;gt; /etc/locale.conf
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
 
 ### Хостнейм
-echo "archlinux" &amp;amp;amp;gt; /etc/hostname
+echo "archlinux" > /etc/hostname
 
 ### Сеть
 systemctl enable NetworkManager
@@ -45,15 +45,15 @@ echo "root:password" | chpasswd
 sed -i 's/# %wheel ALL/%wheel ALL/' /etc/sudoers
 
 ### SUDO безопасность
-echo "Defaults timestamp_timeout=0" &amp;amp;amp;gt;&amp;amp;amp;gt; /etc/sudoers
-echo "Defaults logfile=/var/log/sudo.log" &amp;amp;amp;gt;&amp;amp;amp;gt; /etc/sudoers
+echo "Defaults timestamp_timeout=0" >> /etc/sudoers
+echo "Defaults logfile=/var/log/sudo.log" >> /etc/sudoers
 
 ### systemd-boot
 bootctl install
 
 ROOT_UUID=$(blkid -s PARTUUID -o value ${DISK}p2)
 
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; BOOT &amp;amp;amp;gt; /boot/loader/entries/arch.conf
+cat << BOOT > /boot/loader/entries/arch.conf
 title   Arch Linux
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
@@ -70,7 +70,7 @@ systemctl enable auditd
 pacman -S --noconfirm nftables
 systemctl enable nftables
 
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; NFT &amp;amp;amp;gt; /etc/nftables.conf
+cat << NFT > /etc/nftables.conf
 table inet filter {
   chain input {
     type filter hook input priority 0;
@@ -86,7 +86,7 @@ table inet filter {
 NFT
 
 ### 3. journald: защита логов
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; JRN &amp;amp;amp;gt; /etc/systemd/journald.conf.d/00-sec.conf
+cat << JRN > /etc/systemd/journald.conf.d/00-sec.conf
 [Journal]
 Storage=persistent
 Compress=yes
@@ -103,8 +103,8 @@ systemctl enable fail2ban
 pacman -S --noconfirm cronie
 systemctl enable cronie
 
-echo "0 5 * * * root pacman -Sy --noconfirm &amp;amp;amp;amp;&amp;amp;amp;amp; pacman -Su --noconfirm" \
-    &amp;amp;amp;gt; /etc/cron.d/auto-update
+echo "0 5 * * * root pacman -Sy --noconfirm && pacman -Su --noconfirm" \
+    > /etc/cron.d/auto-update
 
 
 ### Установка Hyprland + окружение
@@ -122,7 +122,7 @@ pacman -S --noconfirm \
 pacman -S --noconfirm greetd greetd-tuigreet
 systemctl enable greetd
 
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; GREET &amp;amp;amp;gt; /etc/greetd/config.toml
+cat << GREET > /etc/greetd/config.toml
 [terminal]
 vt = 1
 
@@ -133,11 +133,11 @@ GREET
 
 ### Конфиги Hyprland
 mkdir -p /home/user/.config/hypr
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; HYPR &amp;amp;amp;gt; /home/user/.config/hypr/hyprland.conf
-exec-once = waybar &amp;amp;amp;amp;
-exec-once = mako &amp;amp;amp;amp;
-exec-once = nm-applet &amp;amp;amp;amp;
-exec-once = swww init &amp;amp;amp;amp;&amp;amp;amp;amp; swww img ~/Pictures/wall.jpg
+cat << HYPR > /home/user/.config/hypr/hyprland.conf
+exec-once = waybar &
+exec-once = mako &
+exec-once = nm-applet &
+exec-once = swww init && swww img ~/Pictures/wall.jpg
 
 source = ~/.config/hypr/keybinds.conf
 source = ~/.config/hypr/monitors.conf
@@ -158,7 +158,7 @@ HYPR
 
 mkdir -p /home/user/.config/hypr
 
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; KEYS &amp;amp;amp;gt; /home/user/.config/hypr/keybinds.conf
+cat << KEYS > /home/user/.config/hypr/keybinds.conf
 bind = SUPER, Return, exec, kitty
 bind = SUPER, Q, killactive
 bind = SUPER, D, exec, fuzzel
@@ -185,13 +185,13 @@ bind = ,XF86AudioLowerVolume, exec, pactl set-sink-volume @DEFAULT_SINK@ -5%
 bind = ,XF86AudioMute, exec, pactl set-sink-mute @DEFAULT_SINK@ toggle
 KEYS
 
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; MON &amp;amp;amp;gt; /home/user/.config/hypr/monitors.conf
+cat << MON > /home/user/.config/hypr/monitors.conf
 monitor = , preferred, auto, 1
 MON
 
 ### Waybar
 mkdir -p /home/user/.config/waybar
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; WB &amp;amp;amp;gt; /home/user/.config/waybar/config
+cat << WB > /home/user/.config/waybar/config
 {
   "layer": "top",
   "position": "top",
@@ -204,7 +204,7 @@ WB
 
 ### Kitty
 mkdir -p /home/user/.config/kitty
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; KIT &amp;amp;amp;gt; /home/user/.config/kitty/kitty.conf
+cat << KIT > /home/user/.config/kitty/kitty.conf
 font_family JetBrainsMono Nerd Font
 font_size 13
 cursor_blink_interval 0
@@ -212,7 +212,7 @@ KIT
 
 ### Mako
 mkdir -p /home/user/.config/mako
-cat &amp;amp;amp;lt;&amp;amp;amp;lt; MK &amp;amp;amp;gt; /home/user/.config/mako/config
+cat << MK > /home/user/.config/mako/config
 background-color=#1e1e2eff
 border-color=#88c0d0ff
 text-color=#eceff4ff
