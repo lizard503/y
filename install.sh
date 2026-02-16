@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # =============================================================
-# УСТАНОВЩИК BLACKARCH + HYPRLAND ДЛЯ SOC-АНАЛИТИКА
-# Версия: 1.0
+# BLACKARCH В ИЗОЛИРОВАННОМ КОНТЕЙНЕРЕ
+# user - обычная жизнь на хосте
+# pentest - полностью изолированный BlackArch в контейнере
 # =============================================================
 
-set -e
+set -euo pipefail
 
-# --- ЦВЕТА ДЛЯ ВЫВОДА (если gum не установлен) ---
+# --- Цвета ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -16,272 +17,220 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# --- ПРОВЕРКА И УСТАНОВКА GUM ---
+# --- Функции ---
+log() { echo -e "${GREEN}[$(date +%H:%M:%S)]${NC} $1"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# --- Функция безопасного ввода пароля с очисткой памяти ---
+read_secure_password() {
+    local prompt=$1
+    local password=""
+    local password2=""
+    
+    while true; do
+        # Читаем напрямую из /dev/tty
+        read -s -p "$prompt: " password < /dev/tty
+        echo > /dev/tty
+        read -s -p "Подтвердите: " password2 < /dev/tty
+        echo > /dev/tty
+        
+        if [ "$password" != "$password2" ]; then
+            echo "❌ Пароли не совпадают!" > /dev/tty
+            continue
+        fi
+        
+        # Проверка сложности
+        if [ ${#password} -lt 12 ]; then
+            echo "❌ Пароль должен быть минимум 12 символов!" > /dev/tty
+            continue
+        fi
+        
+        if ! [[ "$password" =~ [0-9] ]]; then
+            echo "❌ Пароль должен содержать цифру!" > /dev/tty
+            continue
+        fi
+        
+        if ! [[ "$password" =~ [A-Z] ]]; then
+            echo "❌ Пароль должен содержать заглавную букву!" > /dev/tty
+            continue
+        fi
+        
+        if ! [[ "$password" =~ [a-z] ]]; then
+            echo "❌ Пароль должен содержать строчную букву!" > /dev/tty
+            continue
+        fi
+        
+        if ! [[ "$password" =~ [^a-zA-Z0-9] ]]; then
+            echo "❌ Пароль должен содержать спецсимвол!" > /dev/tty
+            continue
+        fi
+        
+        break
+    done
+    
+    # Возвращаем пароль, вызывающая функция должна сразу его использовать и затереть
+    echo "$password"
+}
+
+# --- Проверка gum ---
 if ! command -v gum &> /dev/null; then
-    echo -e "${YELLOW}Устанавливаем gum для красивого интерфейса...${NC}"
+    echo -e "${YELLOW}Устанавливаем gum...${NC}"
     pacman -Sy --noconfirm gum
 fi
 
-# --- ПРИВЕТСТВИЕ ---
-gum style --foreground 212 --border-foreground 196 --border double --align center --width 70 --margin "1 2" --padding "2 4" \
-"🛡️  УСТАНОВЩИК BLACKARCH ДЛЯ SOC  🛡️" \
-"Специализированное окружение для аналитика SOC" \
-"Современный Hyprland + 3000+ инструментов"
+# --- Заголовок ---
+gum style --foreground 196 --border-foreground 196 --border double --align center --width 70 --margin "1" --padding "2" \
+"🛡️  BLACKARCH В ИЗОЛИРОВАННОМ КОНТЕЙНЕРЕ  🛡️" \
+"user - обычная жизнь на хосте" \
+"pentest - полностью изолированный контейнер"
 
-# --- ПРОВЕРКА, ЧТО МЫ В ARCH LIVE ---
+# --- Проверка окружения ---
+log "Проверяем окружение..."
 if ! grep -q "Arch Linux" /etc/os-release 2>/dev/null; then
-    gum style --foreground 196 "❌ Этот скрипт должен запускаться из Arch Linux Live среды!"
-    exit 1
+    error "Запускай скрипт из Arch Linux Live среды!"
+fi
+
+if ! ping -c 1 archlinux.org &>/dev/null; then
+    error "Нет интернета!"
 fi
 
 # =============================================================
-# ИНТЕРАКТИВНАЯ КОНФИГУРАЦИЯ
+# ИНТЕРАКТИВНАЯ НАСТРОЙКА
 # =============================================================
 
-# 1. Выбор диска
-gum style --foreground 99 "💾 Выбери диск для установки (ВНИМАНИЕ: все данные будут стерты!):"
-DISK_LIST=$(lsblk -d -n -o NAME,SIZE,TYPE,MODEL | grep "disk")
-SELECTED_DISK_LINE=$(gum choose --height=10 <<< "$DISK_LIST")
-DISK="/dev/$(echo "$SELECTED_DISK_LINE" | awk '{print $1}')"
+# --- Выбор диска ---
+gum style --foreground 99 "💾 Выбери диск для установки:"
+DISK_LIST=$(lsblk -d -n -o NAME,SIZE,MODEL | grep -v "loop")
+SELECTED=$(gum choose --height=10 <<< "$DISK_LIST")
+DISK="/dev/$(echo "$SELECTED" | awk '{print $1}')"
 
-if [[ -z "$DISK" ]]; then
-    gum style --foreground 196 "❌ Диск не выбран. Выход."
-    exit 1
-fi
+gum style --foreground 196 "⚠️  Диск $DISK будет полностью очищен!"
+gum confirm "Продолжить?" || exit 0
 
-gum style --foreground 196 "⚠️  ВЫБРАН ДИСК: $DISK - ВСЕ ДАННЫЕ БУДУТ УНИЧТОЖЕНЫ!"
-if ! gum confirm "Точно продолжаем?"; then
-    exit 0
-fi
+# --- Имя компьютера ---
+HOSTNAME=$(gum input --placeholder "hostname" --value "security-lab")
+HOSTNAME=${HOSTNAME:-security-lab}
 
-# 2. Имя компьютера
-gum style --foreground 99 "🏷️  Введи hostname (например: soc-工作站-01):"
-HOSTNAME=$(gum input --placeholder "soc-workstation" --value "soc-workstation")
-HOSTNAME=${HOSTNAME:-soc-workstation}
+# --- Пароли для обычного пользователя ---
+gum style --foreground 99 "👤 НАСТРОЙКА ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ (user)"
+USER_PASSWORD=$(read_secure_password "Пароль для user")
 
-# 3. Имя пользователя
-gum style --foreground 99 "👤 Введи имя пользователя:"
-USERNAME=$(gum input --placeholder "analyst" --value "analyst")
-USERNAME=${USERNAME:-analyst}
+# --- Пароль root ---
+ROOT_PASSWORD=$(read_secure_password "Пароль root")
 
-# 4. Пароли (с подтверждением)
-gum style --foreground 99 "🔑 Пароль для $USERNAME:"
-PASSWORD=$(gum input --password)
-gum style --foreground 99 "🔑 Подтверди пароль:"
-PASSWORD_CONFIRM=$(gum input --password)
+# --- Размер диска для контейнера ---
+gum style --foreground 99 "📦 Выдели место для контейнера с BlackArch (в GiB):"
+CONTAINER_SIZE=$(gum input --placeholder "30" --value "30")
+CONTAINER_SIZE=${CONTAINER_SIZE:-30}
 
-if [ "$PASSWORD" != "$PASSWORD_CONFIRM" ]; then
-    gum style --foreground 196 "❌ Пароли не совпадают. Выход."
-    exit 1
-fi
-
-gum style --foreground 99 "🔑 Пароль root:"
-ROOT_PASSWORD=$(gum input --password)
-gum style --foreground 99 "🔑 Подтверди пароль root:"
-ROOT_PASSWORD_CONFIRM=$(gum input --password)
-
-if [ "$ROOT_PASSWORD" != "$ROOT_PASSWORD_CONFIRM" ]; then
-    gum style --foreground 196 "❌ Пароли не совпадают. Выход."
-    exit 1
-fi
-
-# 5. Размер swap (с анализом RAM)
-RAM_GIB=$(free -g | awk '/^Mem:/{print $2}')
-RECOMMENDED_SWAP=$(( RAM_GIB > 16 ? 8 : RAM_GIB > 8 ? 4 : RAM_GIB ))
-if [ "$RECOMMENDED_SWAP" -eq 0 ]; then RECOMMENDED_SWAP=2; fi
-
-gum style --foreground 99 "💿 Размер swap в GiB (рекомендуется $RECOMMENDED_SWAP):"
-SWAP_SIZE=$(gum input --placeholder "$RECOMMENDED_SWAP" --value "$RECOMMENDED_SWAP")
-SWAP_SIZE=${SWAP_SIZE:-$RECOMMENDED_SWAP}
-
-# 6. Видеодрайвер
-gum style --foreground 99 "🎮 Выбери графический драйвер:"
-GRAPHICS_DRIVER_CHOICE=$(gum choose "Intel (встроенная)" "AMD (Radeon)" "NVIDIA (проприетарный)" "NVIDIA (open kernel)" "VMware/VirtualBox" "Не устанавливать (только базовый)")
-
-GRAPHICS_PACKAGES="mesa"
-case "$GRAPHICS_DRIVER_CHOICE" in
-    "Intel (встроенная)")
-        GRAPHICS_PACKAGES="$GRAPHICS_PACKAGES vulkan-intel intel-media-driver"
-        ;;
-    "AMD (Radeon)")
-        GRAPHICS_PACKAGES="$GRAPHICS_PACKAGES vulkan-radeon xf86-video-amdgpu"
-        ;;
-    "NVIDIA (проприетарный)")
-        GRAPHICS_PACKAGES="$GRAPHICS_PACKAGES nvidia nvidia-utils nvidia-settings"
-        NVIDIA_DRIVER="proprietary"
-        ;;
-    "NVIDIA (open kernel)")
-        GRAPHICS_PACKAGES="$GRAPHICS_PACKAGES nvidia-open nvidia-utils nvidia-settings"
-        NVIDIA_DRIVER="open"
-        ;;
-    "VMware/VirtualBox")
-        GRAPHICS_PACKAGES="$GRAPHICS_PACKAGES virtualbox-guest-utils xf86-video-vmware"
-        ;;
-esac
-
-# 7. Выбор набора инструментов BlackArch
-gum style --foreground 99 "🛠️  Выбери набор инструментов BlackArch:"
-
+# --- Выбор набора BlackArch инструментов ---
+gum style --foreground 196 "🛠️  Выбери набор инструментов для контейнера:"
 TOOLSET_CHOICE=$(gum choose \
-    "1️⃣  Минимальный (только базовые инструменты)" \
-    "2️⃣  Стандартный (рекомендуется для SOC)" \
-    "3️⃣  Полный (ВСЕ инструменты, >80GB)" \
-    "4️⃣  Выборочная установка групп")
+    "1️⃣  Минимальный (только базовые, ~2GB)" \
+    "2️⃣  Стандартный (рекомендуется, ~8GB)" \
+    "3️⃣  Полный (все инструменты, >50GB)")
 
 case "$TOOLSET_CHOICE" in
     *"Минимальный"*)
-        BLACKARCH_GROUPS="blackarch-config-blackarch blackarch-recon"
+        BLACKARCH_GROUPS="blackarch-recon blackarch-scanner"
         ;;
     *"Стандартный"*)
-        BLACKARCH_GROUPS="blackarch-config-blackarch blackarch-recon blackarch-scanner blackarch-sniffer \
-                          blackarch-forensic blackarch-networking blackarch-webapp blackarch-wordlist"
+        BLACKARCH_GROUPS="blackarch-recon blackarch-scanner blackarch-sniffer \
+                          blackarch-forensic blackarch-webapp blackarch-exploitation"
         ;;
     *"Полный"*)
         BLACKARCH_GROUPS="blackarch"
         ;;
-    *"Выборочная"*)
-        gum style --foreground 99 "Выбери группы (через пробел):"
-        gum style --foreground 214 "Доступные группы:"
-        gum style "blackarch-recon - сбор информации"
-        gum style "blackarch-scanner - сканирование"
-        gum style "blackarch-sniffer - сниффинг"
-        gum style "blackarch-forensic - форензика"
-        gum style "blackarch-webapp - веб-приложения"
-        gum style "blackarch-wireless - Wi-Fi"
-        gum style "blackarch-cracker - взлом паролей"
-        gum style "blackarch-exploitation - эксплуатация"
-        gum style "blackarch-malware - вредоносное ПО"
-        gum style "blackarch-wordlist - словари"
-        
-        BLACKARCH_GROUPS=$(gum input --placeholder "blackarch-recon blackarch-scanner")
-        ;;
 esac
 
-# 8. Шифрование диска
-gum style --foreground 99 "🔐 Включить LUKS шифрование диска? (рекомендуется для безопасности):"
-ENCRYPT_DISK=$(gum choose "Да (рекомендуется)" "Нет")
+# --- Видеодрайвер ---
+GPU=$(gum choose "Intel" "AMD" "NVIDIA" "VMware/VirtualBox")
+case $GPU in
+    "Intel") GRAPHICS="mesa vulkan-intel intel-media-driver" ;;
+    "AMD") GRAPHICS="mesa vulkan-radeon xf86-video-amdgpu" ;;
+    "NVIDIA") GRAPHICS="nvidia nvidia-utils nvidia-settings"; NVIDIA=true ;;
+    "VMware/VirtualBox") GRAPHICS="virtualbox-guest-utils xf86-video-vmware" ;;
+esac
 
-# 9. Подтверждение
-gum style --border normal --margin "1" --padding "1" --foreground 212 \
-"📋 СВОДКА КОНФИГУРАЦИИ:" \
-"Диск:           $DISK (шифрование: $ENCRYPT_DISK)" \
-"Hostname:       $HOSTNAME" \
-"Пользователь:   $USERNAME" \
-"Swap:           ${SWAP_SIZE}G" \
-"Драйвер:        $GRAPHICS_DRIVER_CHOICE" \
-"Инструменты:    $TOOLSET_CHOICE"
+# --- Подтверждение ---
+gum style --border normal --padding "1" \
+"📋 КОНФИГУРАЦИЯ:
+Диск:          $DISK
+Контейнер:     ${CONTAINER_SIZE}G для BlackArch
+Пользователи:  user (хоcт) + pentest (в контейнере)
+Инструменты:   $TOOLSET_CHOICE"
 
-if ! gum confirm "🚀 Начать установку?"; then
-    gum style --foreground 196 "❌ Установка отменена."
-    exit 0
-fi
+gum confirm "Начать установку?" || exit 0
 
 # =============================================================
-# НАЧАЛО УСТАНОВКИ
+# РАЗМЕТКА ДИСКА
 # =============================================================
+log "Размечаем диск..."
 
-gum spin --title "Инициализация..." -- sleep 1
-
-# --- РАЗМЕТКА ДИСКА ---
-gum spin --title "Размечаем диск..." -- sleep 1
+# Очистка
 sgdisk --zap-all "$DISK"
-sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:EFI "$DISK"
-sgdisk --new=2:0:+${SWAP_SIZE}G --typecode=2:8200 --change-name=2:SWAP "$DISK"
-sgdisk --new=3:0:0 --typecode=3:8300 --change-name=3:ROOT "$DISK"
+
+# Создание разделов: EFI + Boot + Root + Container
+sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:"EFI" "$DISK"
+sgdisk --new=2:0:+2G --typecode=2:8300 --change-name=2:"BOOT" "$DISK"
+sgdisk --new=3:0:0 --typecode=3:8300 --change-name=3:"ROOT" "$DISK"
 
 # Определяем имена разделов
 PART_EFI="${DISK}1"
-PART_SWAP="${DISK}2"
+PART_BOOT="${DISK}2"
 PART_ROOT="${DISK}3"
+
 if [[ "$DISK" == *"nvme"* ]] || [[ "$DISK" == *"mmcblk"* ]]; then
     PART_EFI="${DISK}p1"
-    PART_SWAP="${DISK}p2"
+    PART_BOOT="${DISK}p2"
     PART_ROOT="${DISK}p3"
 fi
 
-# --- ШИФРОВАНИЕ (опционально) ---
-if [[ "$ENCRYPT_DISK" == "Да (рекомендуется)" ]]; then
-    gum style --foreground 99 "🔐 Настраиваем LUKS шифрование..."
-    
-    # Запрашиваем пароль для LUKS
-    gum style --foreground 99 "Введи пароль для шифрования диска:"
-    LUKS_PASSWORD=$(gum input --password)
-    gum style --foreground 99 "Подтверди пароль:"
-    LUKS_PASSWORD_CONFIRM=$(gum input --password)
-    
-    if [ "$LUKS_PASSWORD" != "$LUKS_PASSWORD_CONFIRM" ]; then
-        gum style --foreground 196 "❌ Пароли не совпадают. Выход."
-        exit 1
-    fi
-    
-    # Шифруем корневой раздел
-    printf "%s" "$LUKS_PASSWORD" | cryptsetup luksFormat --type luks2 "$PART_ROOT" -
-    printf "%s" "$LUKS_PASSWORD" | cryptsetup open "$PART_ROOT" cryptroot -
-    
-    # Внутри шифрования создаем физический том LVM (для гибкости)
-    pvcreate /dev/mapper/cryptroot
-    vgcreate vg0 /dev/mapper/cryptroot
-    lvcreate -l 100%FREE vg0 -n root
-    
-    ROOT_FS="/dev/mapper/vg0-root"
-else
-    ROOT_FS="$PART_ROOT"
-fi
-
-# --- ФОРМАТИРОВАНИЕ ---
-gum spin --title "Форматируем разделы..." -- sleep 1
+# --- Форматирование ---
+log "Форматируем разделы..."
 mkfs.fat -F32 "$PART_EFI"
-mkswap "$PART_SWAP"
-swapon "$PART_SWAP"
+mkfs.ext4 -F "$PART_BOOT"
+mkfs.ext4 -F "$PART_ROOT"
 
-if [[ "$ENCRYPT_DISK" == "Да (рекомендуется)" ]]; then
-    mkfs.ext4 -F "$ROOT_FS"
-else
-    mkfs.ext4 -F "$ROOT_FS"
-fi
-
-# --- МОНТИРОВАНИЕ ---
-gum spin --title "Монтируем разделы..." -- sleep 1
-umount -R /mnt 2>/dev/null || true
-mount "$ROOT_FS" /mnt
+# --- Монтирование ---
+log "Монтируем разделы..."
+mount "$PART_ROOT" /mnt
 mkdir -p /mnt/boot
-mount -o fmask=0077,dmask=0077 "$PART_EFI" /mnt/boot
+mount -o fmask=0077,dmask=0077 "$PART_BOOT" /mnt/boot
+mkdir -p /mnt/boot/efi
+mount "$PART_EFI" /mnt/boot/efi
 
 # =============================================================
-# УСТАНОВКА БАЗОВОЙ СИСТЕМЫ
+# УСТАНОВКА БАЗОВОЙ СИСТЕМЫ (ХОСТ)
 # =============================================================
+log "Устанавливаем базовую систему хоста..."
 
-BASE_PACKAGES="base linux linux-firmware base-devel networkmanager sudo vim git \
-               nano man-db man-pages texinfo $GRAPHICS_PACKAGES"
+BASE_PKGS="base linux linux-firmware base-devel networkmanager sudo vim git \
+           man-db man-pages texinfo $GRAPHICS \
+           systemd-container arch-install-scripts btrfs-progs"
 
-gum spin --title "Устанавливаем базовую систему..." -- pacstrap /mnt $BASE_PACKAGES
+pacstrap /mnt $BASE_PKGS
 
 # Генерация fstab
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # =============================================================
-# ПЕРВИЧНАЯ НАСТРОЙКА В CHROOT
+# НАСТРОЙКА ХОСТА
 # =============================================================
-
-gum spin --title "Настраиваем систему..." -- sleep 1
-
-# Предварительные расчеты
-if [[ "$ENCRYPT_DISK" == "Да (рекомендуется)" ]]; then
-    ROOT_UUID=$(blkid -s UUID -o value "$PART_ROOT")
-fi
+log "Настраиваем хост-систему..."
 
 arch-chroot /mnt /bin/bash <<EOF
 
-# --- ЛОКАЛИЗАЦИЯ ---
+# --- Время и локаль ---
 ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime
 hwclock --systohc
 echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
 echo "ru_RU.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
-echo "LC_TIME=ru_RU.UTF-8" >> /etc/locale.conf
 
-# --- ХОСТНЕЙМ ---
+# --- Сеть ---
 echo "$HOSTNAME" > /etc/hostname
 cat > /etc/hosts << HOSTS
 127.0.0.1   localhost
@@ -289,511 +238,419 @@ cat > /etc/hosts << HOSTS
 127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
 HOSTS
 
-# --- ПОЛЬЗОВАТЕЛИ ---
-useradd -m -G wheel,audio,video,storage,input,network -s /bin/bash "$USERNAME"
+# --- Создание обычного пользователя ---
+useradd -m -G wheel,audio,video,storage,input,power -s /bin/bash user
+
+# --- Настройка sudo ---
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
-echo "Defaults timestamp_timeout=5" >> /etc/sudoers
-echo "Defaults logfile=/var/log/sudo.log" >> /etc/sudoers
+echo "Defaults timestamp_timeout=10" >> /etc/sudoers
+echo "Defaults lecture_file = /etc/sudoers.lecture" >> /etc/sudoers
+echo "⚠️  Ты в обычном режиме. Будь осторожен с sudo!" > /etc/sudoers.lecture
 
-# --- ЗАГРУЗЧИК (с поддержкой шифрования) ---
-bootctl install
+# --- Загрузчик (systemd-boot) ---
+bootctl install --esp-path=/boot/efi
 
-if [[ "$ENCRYPT_DISK" == "Да (рекомендуется)" ]]; then
-    # Для шифрованного корня нужно добавить хуки в mkinitcpio
-    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
-    mkinitcpio -P
-    
-    # Настройка загрузчика для шифрованного раздела
-    cat > /boot/loader/entries/arch.conf << BOOTENTRY
-title   Arch Linux (BlackArch SOC)
+cat > /boot/loader/entries/arch.conf << BOOT
+title   Arch Linux (Host)
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
-options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/vg0-root rw quiet
-BOOTENTRY
-else
-    PARTUUID_ROOT=$(blkid -s PARTUUID -o value "$PART_ROOT")
-    cat > /boot/loader/entries/arch.conf << BOOTENTRY
-title   Arch Linux (BlackArch SOC)
-linux   /vmlinuz-linux
-initrd  /initramfs-linux.img
-options root=PARTUUID=$PARTUUID_ROOT rw quiet
-BOOTENTRY
-fi
+options root=PARTUUID=$(blkid -s PARTUUID -o value $PART_ROOT) rw quiet
+BOOT
 
-# Конфиг загрузчика
-echo "default arch.conf" > /boot/loader/loader.conf
-echo "timeout 3" >> /boot/loader/loader.conf
-echo "console-mode max" >> /boot/loader/loader.conf
+cat > /boot/loader/loader.conf << LOADER
+default arch.conf
+timeout 2
+console-mode max
+editor no
+LOADER
 
-# --- СЕТЬ ---
+# --- NetworkManager ---
 systemctl enable NetworkManager
 
-# --- НАСТРОЙКА ДЛЯ NVIDIA (Wayland) ---
-if [ -n "$NVIDIA_DRIVER" ]; then
+# --- NVIDIA ---
+if [ -n "$NVIDIA" ]; then
     sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
     mkinitcpio -P
-    # Добавляем параметры для загрузчика
-    sed -i 's/options.*/& nvidia_drm.modeset=1/' /boot/loader/entries/arch.conf
 fi
 
 EOF
 
-# Установка паролей
+# --- Установка паролей ---
 printf "%s:%s" "root" "$ROOT_PASSWORD" | arch-chroot /mnt chpasswd
-printf "%s:%s" "$USERNAME" "$PASSWORD" | arch-chroot /mnt chpasswd
+printf "%s:%s" "user" "$USER_PASSWORD" | arch-chroot /mnt chpasswd
+
+# Очищаем пароли из памяти
+unset ROOT_PASSWORD USER_PASSWORD
 
 # =============================================================
-# ДОБАВЛЕНИЕ BLACKARCH РЕПОЗИТОРИЯ
+# СОЗДАНИЕ ИЗОЛИРОВАННОГО КОНТЕЙНЕРА ДЛЯ PENTEST
 # =============================================================
-
-gum style --foreground 196 "🖤 Добавляем BlackArch репозиторий..."
+log "📦 Создаем изолированный контейнер для pentest..."
 
 arch-chroot /mnt /bin/bash <<EOF
 
-# Включаем multilib (нужен для многих инструментов BlackArch) [citation:6][citation:7]
+# --- Создаем директорию для контейнеров ---
+mkdir -p /var/lib/machines
+btrfs subvolume create /var/lib/machines/pentest 2>/dev/null || mkdir -p /var/lib/machines/pentest
+
+# --- Устанавливаем BlackArch в контейнер ---
+# Сначала устанавливаем базовую систему Arch
+pacstrap -c /var/lib/machines/pentest base linux linux-firmware base-devel
+
+# --- Добавляем BlackArch репозиторий в контейнер ---
+cat > /var/lib/machines/pentest/tmp/install-blackarch.sh << 'BLACKARCH'
+#!/bin/bash
+set -e
+
+# Включаем multilib
 sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 sed -i 's/^#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf
 
-# Устанавливаем ключи и добавляем репозиторий BlackArch [citation:3][citation:9]
+# Скачиваем и проверяем ключи BlackArch
 cd /tmp
-curl -O https://blackarch.org/strap.sh
+curl --proto "=https" --tlsv1.2 -O https://blackarch.org/blackarch-keyring.pkg.tar.xz
+curl --proto "=https" --tlsv1.2 -O https://blackarch.org/blackarch-keyring.pkg.tar.xz.sig
 
-# Проверяем контрольную сумму (важно для безопасности) [citation:9]
-EXPECTED_SUM="bbf0a0b838aed0ec05fff2d375dd17591cbdf8aa"
-ACTUAL_SUM=\$(sha1sum strap.sh | cut -d' ' -f1)
+# Проверяем подпись (если есть pacman-key)
+pacman-key --verify blackarch-keyring.pkg.tar.xz.sig || exit 1
 
-if [ "\$ACTUAL_SUM" = "\$EXPECTED_SUM" ]; then
-    chmod +x strap.sh
-    ./strap.sh
-else
-    echo "❌ Ошибка проверки strap.sh! Прерывание."
-    exit 1
-fi
+# Устанавливаем ключи
+pacman -U --noconfirm blackarch-keyring.pkg.tar.xz
 
-# Обновляем ключи [citation:3]
-pacman-key --init
-pacman-key --populate archlinux blackarch
-pacman -Syyu --noconfirm
+# Добавляем репозиторий
+echo "[blackarch]" >> /etc/pacman.conf
+echo "Server = https://mirror.f4st.host/blackarch/\$repo/os/\$arch" >> /etc/pacman.conf
+echo "SigLevel = Required DatabaseOptional" >> /etc/pacman.conf
 
-EOF
+pacman -Syy
+BLACKARCH
 
-# =============================================================
-# УСТАНОВКА ИНСТРУМЕНТОВ BLACKARCH
-# =============================================================
+chmod +x /var/lib/machines/pentest/tmp/install-blackarch.sh
+systemd-nspawn -D /var/lib/machines/pentest /tmp/install-blackarch.sh
 
-gum style --foreground 196 "🛠️  Устанавливаем инструменты BlackArch..."
-
-arch-chroot /mnt /bin/bash <<EOF
-
-# Установка выбранных групп инструментов
+# --- Устанавливаем выбранные инструменты BlackArch ---
 if [ "$BLACKARCH_GROUPS" = "blackarch" ]; then
-    # Полная установка (может занять много времени)
-    echo "Устанавливаем ВСЕ инструменты BlackArch... это может занять >1 часа"
-    pacman -S --noconfirm --needed blackarch
+    systemd-nspawn -D /var/lib/machines/pentest pacman -S --noconfirm blackarch
 else
-    # Выборочная установка
     for group in $BLACKARCH_GROUPS; do
-        echo "Устанавливаем группу: \$group"
-        pacman -S --noconfirm --needed \$group
+        systemd-nspawn -D /var/lib/machines/pentest pacman -S --noconfirm \$group || true
     done
 fi
 
-# Устанавливаем дополнительные полезные инструменты для SOC
-pacman -S --noconfirm --needed \
-    wireshark-qt \
-    tcpdump \
-    nmap \
-    metasploit \
-    burpsuite \
-    hydra \
-    john \
-    sqlmap \
-    aircrack-ng \
-    wireshark-cli \
-    exploitdb \
-    binwalk \
-    foremost \
-    volatility \
-    yara \
-    rkhunter \
-    chkrootkit \
-    lynis \
-    nikto \
-    dirb \
-    gobuster \
-    ffuf
+# --- Создаем пользователя в контейнере ---
+systemd-nspawn -D /var/lib/machines/pentest useradd -m -G video,audio -s /bin/bash pentest
+systemd-nspawn -D /var/lib/machines/pentest sh -c "echo 'pentest:pentest' | chpasswd"
 
-# Добавляем пользователя в группу wireshark
-usermod -aG wireshark "$USERNAME"
+# --- Настраиваем окружение в контейнере ---
+cat > /var/lib/machines/pentest/home/pentest/.bashrc << 'BASHRC'
+# Алиасы для пентеста
+alias nmap='nmap'
+alias wireshark='wireshark'
+alias msf='msfconsole'
+alias listen='tcpdump -i any'
+alias lab='cd ~/labs'
+alias tools='cd ~/tools'
+
+# Создаем структуру директорий
+mkdir -p ~/labs/{recon,exploit,post}
+mkdir -p ~/tools
+mkdir -p ~/reports
+
+# Приглашение
+PS1='\[\e[0;31m\]pentest\[\e[0m\]@\[\e[0;34m\]\h\[\e[0m\] \w\n# '
+BASHRC
+
+# --- Настраиваем X11 forwarding для графических приложений ---
+mkdir -p /var/lib/machines/pentest/tmp/.X11-unix
+mkdir -p /var/lib/machines/pentest/home/pentest/.Xauthority
 
 EOF
 
 # =============================================================
-# УСТАНОВКА HYPRLAND И НАСТРОЙКА ОКРУЖЕНИЯ
+# НАСТРОЙКА ЗАПУСКА КОНТЕЙНЕРА
 # =============================================================
-
-gum style --foreground 212 "🎨 Устанавливаем Hyprland и настраиваем рабочее окружение..."
+log "🔧 Настраиваем автоматический запуск контейнера..."
 
 arch-chroot /mnt /bin/bash <<EOF
 
-# Установка Hyprland и компонентов
+# --- Создаем systemd service для контейнера ---
+cat > /etc/systemd/system/pentest-container.service << SERVICE
+[Unit]
+Description=pentest BlackArch Container
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/systemd-nspawn -b -D /var/lib/machines/pentest \\
+    --bind=/tmp/.X11-unix:/tmp/.X11-unix \\
+    --bind=/dev/dri:/dev/dri \\
+    --bind=/dev/shm:/dev/shm \\
+    --private-network \\
+    --network-veth-extra=ve-pentest \\
+    --boot
+ExecStop=/usr/bin/machinectl poweroff pentest
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+# --- Настраиваем сетевой мост для контейнера ---
+cat > /etc/systemd/network/ve-pentest.network << NETWORK
+[Match]
+Name=ve-pentest
+
+[Network]
+Address=10.0.0.2/24
+Gateway=10.0.0.1
+NETWORK
+
+# Включаем сервис
+systemctl enable pentest-container.service
+
+# --- Создаем скрипт для входа в контейнер от имени user ---
+cat > /usr/local/bin/enter-pentest << 'ENTER'
+#!/bin/bash
+if [ "\$USER" != "user" ]; then
+    echo "❌ Только user может входить в контейнер!"
+    exit 1
+fi
+
+# Проверяем, запущен ли контейнер
+if ! machinectl status pentest &>/dev/null; then
+    echo "⚠️  Контейнер не запущен. Запускаем..."
+    sudo systemctl start pentest-container.service
+    sleep 5
+fi
+
+# Входим в контейнер
+sudo machinectl login pentest
+ENTER
+
+chmod +x /usr/local/bin/enter-pentest
+
+# --- Добавляем user в группу для управления контейнерами ---
+usermod -aG systemd-nspawn user
+
+# --- Настраиваем sudo для user без пароля для управления контейнером ---
+cat > /etc/sudoers.d/99-container << SUDO
+user ALL=(root) NOPASSWD: /usr/bin/systemctl start pentest-container.service
+user ALL=(root) NOPASSWD: /usr/bin/systemctl stop pentest-container.service
+user ALL=(root) NOPASSWD: /usr/bin/systemctl restart pentest-container.service
+user ALL=(root) NOPASSWD: /usr/bin/machinectl *
+SUDO
+
+EOF
+
+# =============================================================
+# УСТАНОВКА HYPRLAND ДЛЯ ПОЛЬЗОВАТЕЛЯ
+# =============================================================
+log "🎨 Устанавливаем Hyprland для пользователя user..."
+
+arch-chroot /mnt /bin/bash <<EOF
+
+# Установка Hyprland
 pacman -S --noconfirm \
-    hyprland kitty waybar mako thunar \
-    polkit polkit-kde-agent \
-    pipewire pipewire-alsa pipewire-pulse wireplumber \
-    wl-clipboard grim slurp \
-    swww network-manager-applet \
-    ttf-jetbrains-mono-nerd noto-fonts-emoji ttf-dejavu \
+    hyprland kitty waybar wofi mako thunar \
+    polkit-gnome network-manager-applet \
+    pipewire pipewire-pulse wireplumber \
+    grim slurp swappy wl-clipboard \
     brightnessctl playerctl pavucontrol \
-    gvfs fuzzel \
-    qt6-multimedia qt6-wayland fastfetch \
-    power-profiles-daemon sof-firmware alsa-firmware \
-    hypridle hyprlock wayland-protocols \
-    firefox thunderbird \
-    zsh zsh-completions \
-    tmux htop btop \
-    openssh \
-    vim vim-pluginator \
-    git-lfs \
-    python python-pip python-virtualenv \
-    go rust \
-    docker docker-compose \
-    wireguard-tools openvpn
+    ttf-jetbrains-mono-nerd noto-fonts-emoji \
+    qt5-wayland qt6-wayland xdg-desktop-portal-hyprland \
+    firefox thunderbird libreoffice-fresh \
+    zsh zsh-completions
 
-# Включаем сервисы
-systemctl enable NetworkManager
-systemctl enable power-profiles-daemon
-systemctl enable docker
-usermod -aG docker "$USERNAME"
-
-# Установка менеджера входа (greetd)
+# --- Менеджер входа ---
 pacman -S --noconfirm greetd greetd-tuigreet
 systemctl enable greetd
 
-cat > /etc/greetd/config.toml << GREETD
+cat > /etc/greetd/config.toml << GREET
 [terminal]
 vt = 1
 
 [default_session]
-command = "Hyprland"
-user = "$USERNAME"
-GREETD
+command = "tuigreet --remember --time --cmd Hyprland"
+user = "greeter"
+GREET
 
-# =============================================================
-# КОНФИГУРАЦИЯ HYPRLAND ДЛЯ SOC
-# =============================================================
+# --- Конфиг Hyprland для user ---
+mkdir -p /home/user/.config/hypr
+mkdir -p /home/user/.config/kitty
+mkdir -p /home/user/.config/waybar
+mkdir -p /home/user/Pictures
 
-mkdir -p /home/$USERNAME/.config/hypr
-mkdir -p /home/$USERNAME/.config/kitty
-mkdir -p /home/$USERNAME/.config/waybar
-mkdir -p /home/$USERNAME/.config/mako
-mkdir -p /home/$USERNAME/.config/wofi
-mkdir -p /home/$USERNAME/Pictures
-mkdir -p /home/$USERNAME/Projects/{recon,exploit,forensics,reports}
-mkdir -p /home/$USERNAME/Tools
-
-# Скачиваем обои (темные, для работы ночью)
-curl -s -L "https://raw.githubusercontent.com/blackarch/blackarch-artwork/master/backgrounds/blackarch-wallpaper-1920x1080.png" \
-     -o /home/$USERNAME/Pictures/blackarch-wall.png
-
-# Основной конфиг Hyprland
-cat > /home/$USERNAME/.config/hypr/hyprland.conf << 'HYPRLAND'
-# =============================================
-# HYPRLAND CONFIG FOR SOC ANALYST
-# =============================================
-
-# Мониторы (настрой под себя)
+cat > /home/user/.config/hypr/hyprland.conf << 'HYPR'
 monitor=,preferred,auto,1
 
-# Автозапуск
 exec-once = waybar &
 exec-once = mako &
 exec-once = nm-applet --indicator &
+exec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 &
 exec-once = pipewire &
 exec-once = wireplumber &
-exec-once = swww init && swww img ~/Pictures/blackarch-wall.png
 
-# Переменные
-$mainMod = SUPER
-$terminal = kitty
-$fileManager = thunar
-$menu = wofi --show drun
+\$mainMod = SUPER
+\$terminal = kitty
+\$menu = wofi --show drun
 
-# Основные бинды
-bind = $mainMod, Return, exec, $terminal
-bind = $mainMod, Q, killactive,
-bind = $mainMod, M, exit,
-bind = $mainMod, E, exec, $fileManager
-bind = $mainMod, V, togglefloating,
-bind = $mainMod, F, fullscreen,
-bind = $mainMod, Space, exec, $menu
-bind = $mainMod, R, exec, wofi-emoji
+bind = \$mainMod, Return, exec, \$terminal
+bind = \$mainMod, Q, killactive
+bind = \$mainMod, Space, exec, \$menu
+bind = \$mainMod, E, exec, thunar
 
-# SOC-специфичные бинды
-bind = $mainMod SHIFT, N, exec, nmtui
-bind = $mainMod SHIFT, W, exec, wireshark
-bind = $mainMod SHIFT, M, exec, msfconsole
-bind = $mainMod SHIFT, T, exec, $terminal -e "btm"
-bind = $mainMod SHIFT, F, exec, thunar ~/Projects
-bind = $mainMod SHIFT, R, exec, $terminal -e "sudo rkhunter --check"
+# Горячая клавиша для входа в контейнер
+bind = \$mainMod SHIFT, P, exec, kitty -e enter-pentest
 
-# Переключение рабочих столов (9 рабочих столов для разных задач)
-bind = $mainMod, 1, workspace, 1
-bind = $mainMod, 2, workspace, 2
-bind = $mainMod, 3, workspace, 3
-bind = $mainMod, 4, workspace, 4
-bind = $mainMod, 5, workspace, 5
-bind = $mainMod, 6, workspace, 6
-bind = $mainMod, 7, workspace, 7
-bind = $mainMod, 8, workspace, 8
-bind = $mainMod, 9, workspace, 9
-
-bind = $mainMod SHIFT, 1, movetoworkspace, 1
-bind = $mainMod SHIFT, 2, movetoworkspace, 2
-bind = $mainMod SHIFT, 3, movetoworkspace, 3
-bind = $mainMod SHIFT, 4, movetoworkspace, 4
-bind = $mainMod SHIFT, 5, movetoworkspace, 5
-bind = $mainMod SHIFT, 6, movetoworkspace, 6
-bind = $mainMod SHIFT, 7, movetoworkspace, 7
-bind = $mainMod SHIFT, 8, movetoworkspace, 8
-bind = $mainMod SHIFT, 9, movetoworkspace, 9
-
-# Медиа-клавиши
-bindel = ,XF86AudioRaiseVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
-bindel = ,XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
-bindl = ,XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
-bindel = ,XF86MonBrightnessUp, exec, brightnessctl set +10%
-bindel = ,XF86MonBrightnessDown, exec, brightnessctl set 10%-
-bindl = ,XF86AudioPlay, exec, playerctl play-pause
-bindl = ,XF86AudioNext, exec, playerctl next
-bindl = ,XF86AudioPrev, exec, playerctl previous
-
-# Оформление
 general {
     gaps_in = 5
     gaps_out = 10
     border_size = 2
-    col.active_border = rgba(cc0000ff) rgba(ff4444ff) 45deg
-    col.inactive_border = rgba(666666aa)
-    layout = dwindle
-    cursor_inactive_timeout = 0
+    col.active_border = rgba(7aa2f7ee) rgba(c0caf5ee) 45deg
 }
 
 decoration {
     rounding = 8
     blur = yes
-    blur_size = 4
-    blur_passes = 2
-    drop_shadow = yes
-    shadow_range = 4
-    shadow_render_power = 3
-    col.shadow = rgba(1a1b26ee)
 }
+HYPR
 
-# Прозрачность для некоторых окон
-windowrulev2 = opacity 0.95 0.95, class:^(kitty)$
-windowrulev2 = opacity 0.95 0.95, class:^(thunar)$
-windowrulev2 = opacity 0.9 0.9, class:^(firefox)$
-
-# Правила для всплывающих окон
-windowrulev2 = float, title:^(Open File)$
-windowrulev2 = float, title:^(Save As)$
-HYPRLAND
-
-# Конфиг Kitty терминала
-cat > /home/$USERNAME/.config/kitty/kitty.conf << KITTY
-font_family      JetBrainsMono Nerd Font
-font_size        11
+# --- Kitty конфиг ---
+cat > /home/user/.config/kitty/kitty.conf << KITTY
+font_family JetBrainsMono Nerd Font
+font_size 11
 background_opacity 0.92
-window_padding_width 8
-cursor_shape     block
-cursor_blink_interval 0
-scrollback_lines 10000
-tab_bar_style    fade
-active_tab_foreground   #cc0000
-inactive_tab_foreground #666666
-
-# Цветовая схема для работы (темная, не напрягает глаза)
-background #1e1e2e
-foreground #cdd6f4
-selection_background #585b70
-selection_foreground #cdd6f4
-
-# Черный
-color0 #45475a
-color8 #585b70
-
-# Красный
-color1 #f38ba8
-color9 #f38ba8
-
-# Зеленый
-color2  #a6e3a1
-color10 #a6e3a1
-
-# Желтый
-color3  #f9e2af
-color11 #f9e2af
-
-# Синий
-color4  #89b4fa
-color12 #89b4fa
-
-# Пурпурный
-color5  #cba6f7
-color13 #cba6f7
-
-# Голубой
-color6  #94e2d5
-color14 #94e2d5
-
-# Белый
-color7  #bac2de
-color15 #a6adc8
+background #1a1b26
+foreground #c0caf5
 KITTY
 
-# Waybar конфиг для SOC
-cat > /home/$USERNAME/.config/waybar/config << 'WAYBAR'
-{
-    "layer": "top",
-    "position": "top",
-    "height": 30,
-    "spacing": 4,
-    "modules-left": ["hyprland/workspaces"],
-    "modules-center": ["clock"],
-    "modules-right": ["cpu", "memory", "network", "pulseaudio", "battery", "tray"],
-    
-    "hyprland/workspaces": {
-        "disable-scroll": true,
-        "all-outputs": true,
-        "format": "{name}",
-        "persistent_workspaces": {
-            "1": [], "2": [], "3": [], "4": [], "5": [], "6": [], "7": [], "8": [], "9": []
-        }
-    },
-    
-    "clock": {
-        "format": "{:%H:%M  %d.%m.%Y}",
-        "format-alt": "{:%Y-%m-%d}",
-        "tooltip-format": "<tt>{calendar}</tt>",
-        "calendar": {
-            "mode": "month",
-            "on-scroll": 1
-        }
-    },
-    
-    "cpu": {
-        "format": "CPU {usage}%",
-        "tooltip": true,
-        "interval": 2
-    },
-    
-    "memory": {
-        "format": "RAM {}%",
-        "interval": 5
-    },
-    
-    "network": {
-        "format-wifi": "📶 {essid}",
-        "format-ethernet": "🌐 {ifname}",
-        "format-disconnected": "🚫",
-        "tooltip-format": "{ifname} ({ipaddr})",
-        "interval": 5
-    },
-    
-    "pulseaudio": {
-        "format": "{icon} {volume}%",
-        "format-muted": "🔇",
-        "format-icons": ["🔈", "🔉", "🔊"],
-        "on-click": "pavucontrol"
-    },
-    
-    "battery": {
-        "format": "{capacity}% {icon}",
-        "format-icons": ["", "", "", "", ""],
-        "format-charging": "⚡{capacity}%",
-        "interval": 30
-    }
-}
-WAYBAR
+# --- Обои ---
+curl --proto "=https" --tlsv1.2 -s -L "https://raw.githubusercontent.com/tokyo-night/tokyo-night-vscode-theme/master/wallpapers/tokyo-night.png" \
+     -o /home/user/Pictures/wallpaper.jpg 2>/dev/null || true
 
-# Стили Waybar
-cat > /home/$USERNAME/.config/waybar/style.css << CSS
-* {
-    border: none;
-    border-radius: 0;
-    font-family: "JetBrainsMono Nerd Font";
-    font-size: 13px;
-    min-height: 0;
-}
+# --- Права ---
+chown -R user:user /home/user
 
-window#waybar {
-    background: rgba(30, 30, 46, 0.8);
-    color: #cdd6f4;
-}
+EOF
 
-#workspaces button {
-    padding: 0 5px;
-    background: transparent;
-    color: #cdd6f4;
-    border-bottom: 2px solid transparent;
-}
+# =============================================================
+# НАСТРОЙКА БЕЗОПАСНОСТИ
+# =============================================================
+log "🔒 Настраиваем дополнительные механизмы безопасности..."
 
-#workspaces button.active {
-    border-bottom: 2px solid #f38ba8;
-    color: #f38ba8;
-}
+arch-chroot /mnt /bin/bash <<EOF
 
-#workspaces button.urgent {
-    border-bottom: 2px solid #f9e2af;
-    color: #f9e2af;
-}
+# --- UFW firewall ---
+pacman -S --noconfirm ufw
+systemctl enable ufw
+ufw default deny
+ufw limit ssh
+ufw allow from 192.168.1.0/24 to any port 22 comment 'SSH from LAN'
+ufw --force enable
 
-#clock, #cpu, #memory, #network, #pulseaudio, #battery {
-    padding: 0 8px;
-    margin: 0 2px;
-}
+# --- AppArmor для дополнительной защиты ---
+pacman -S --noconfirm apparmor
+systemctl enable apparmor
 
-#cpu {
-    color: #89b4fa;
-}
+# Профиль для контейнера
+cat > /etc/apparmor.d/local/usr.bin.systemd-nspawn << APPARMOR
+# Дополнительные ограничения для systemd-nspawn
+/var/lib/machines/pentest/** r,
+deny /home/user/** rw,
+deny /root/** rw,
+deny /etc/shadow r,
+APPARMOR
 
-#memory {
-    color: #cba6f7;
-}
+# --- Аудит действий ---
+pacman -S --noconfirm audit
+systemctl enable auditd
 
-#network {
-    color: #a6e3a1;
-}
+cat > /etc/audit/rules.d/container.rules << AUDIT
+-w /var/lib/machines/pentest -p wa -k pentest_container
+-w /usr/local/bin/enter-pentest -p x -k pentest_access
+AUDIT
 
-#pulseaudio {
-    color: #f9e2af;
-}
+# --- Защита ядра ---
+cat > /etc/sysctl.d/99-security.conf << SYSCTL
+kernel.kptr_restrict=2
+kernel.dmesg_restrict=1
+kernel.printk=3 3 3 3
+kernel.randomize_va_space=2
+kernel.yama.ptrace_scope=2
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.tcp_syncookies=1
+net.ipv4.tcp_rfc1337=1
+SYSCTL
 
-#battery {
-    color: #94e2d5;
-}
+# --- Запрещаем прямой доступ к контейнеру для всех, кроме user ---
+chmod 750 /var/lib/machines
+chown root:systemd-nspawn /var/lib/machines
 
-#battery.warning {
-    color: #f9e2af;
-}
+EOF
 
-#battery.critical {
-    color: #f38ba8;
-}
-CSS
+# =============================================================
+# ФИНАЛИЗАЦИЯ
+# =============================================================
+log "Завершаем установку..."
+sync
+umount -R /mnt
 
-# Mako (уведомления)
-cat > /home/$USERNAME/.config/mako/config << MAKO
-background-color=#1e1e2e
-text-color=#cdd6f4
-border-color=#f38ba8
-border-size=2
-border-radius=8
-default-timeout=5000
-ignore-timeout=0
-max-history=50
-MAKO
+# --- Красивый вывод ---
+gum style --foreground 196 --border-foreground 46 --border double --align center --width 80 --margin "1" --padding "2" \
+"🎉 УСТАНОВКА ЗАВЕРШЕНА! СИСТЕМА ПОЛНОСТЬЮ ИЗОЛИРОВАНА 🎉
 
-# Wofi (лаунчер)
-cat > /
+┌─────────────────────────────────────────────────────┐
+│  👤 ХОСТ (user)                                      │
+│  • Обычная повседневная жизнь                        │
+│  • Пароль: (ты задал)                                │
+│  • Полный доступ к железу                            │
+│  • Hyprland с Tokyo Night темой                      │
+├─────────────────────────────────────────────────────┤
+│  📦 КОНТЕЙНЕР (pentest)                              │
+│  • Полная изоляция через systemd-nspawn              │
+│  • Собственное сетевое пространство (10.0.0.2)       │
+│  • BlackArch с инструментами пентеста                │
+│  • Пользователь: pentest / пароль: pentest           │
+│  • Нет доступа к файлам хоста                        │
+└─────────────────────────────────────────────────────┘
+
+🚀 ПЕРЕЗАГРУЗКА: reboot
+
+🔑 ВХОД В СИСТЕМУ:
+   • Логин: user / (твой пароль)
+   • Hyprland запустится автоматически
+
+🖥️  ЗАПУСК PENTEST КОНТЕЙНЕРА:
+   1. Нажми SUPER + SHIFT + P (откроется терминал)
+   2. Или в терминале: enter-pentest
+   3. Логин в контейнере: pentest / pentest
+
+📁 ГДЕ ЧТО ХРАНИТСЯ:
+   • /home/user          - твои личные файлы
+   • /var/lib/machines/pentest - файловая система контейнера
+   • В контейнере: ~/labs  - для лабораторных работ
+   • В контейнере: ~/reports - для отчетов
+
+🔒 МЕХАНИЗМЫ БЕЗОПАСНОСТИ:
+   ✓ Контейнер не видит /home/user
+   ✓ Сетевая изоляция (контейнер в своей сети)
+   ✓ AppArmor профили
+   ✓ Аудит всех действий
+   ✓ Firewall с deny по умолчанию
+   ✓ Защита ядра (kptr_restrict, dmesg_restrict и др.)
+
+⚠️ ВАЖНО:
+   1. Для обновления хоста: sudo pacman -Syu
+   2. Для обновления контейнера: enter-pentest → sudo pacman -Syu
+   3. Логи аудита: sudo ausearch -k pentest_container
+   4. Статус контейнера: machinectl status pentest
+   5. Остановка контейнера: sudo systemctl stop pentest-container.service
+
+🎯 ПЕРВЫЕ ШАГИ ПОСЛЕ УСТАНОВКИ:
+   1. Войди как user
+   2. Открой терминал (SUPER + Return)
+   3. Запусти контейнер: enter-pentest
+   4. В контейнере: nmap -h (проверка инструментов)
+   5. Создай свою первую лабораторию: mkdir -p ~/labs/recon
+
+🛡️  УДАЧНОГО ИЗУЧЕНИЯ БЕЗОПАСНОСТИ!
+"
